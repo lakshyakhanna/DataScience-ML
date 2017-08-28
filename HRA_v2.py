@@ -10,6 +10,10 @@ import pandas as pd
 import pandasql as pdsql
 import numpy as np
 from pandas.util.testing import assert_frame_equal
+from sklearn import model_selection
+from sklearn import tree
+from sklearn import ensemble
+import datetime as dt
 
 pysql = lambda q: pdsql.sqldf(q, globals())
 
@@ -44,12 +48,12 @@ diagnosis_name.loc[diagnosis_name.ICD9_CODE =='4019' ]
 
 
 #import lab_events 
-labevents = pd.read_csv('LABEVENTS.csv.gz',compression='gzip',quotechar='"', error_bad_lines=False)
+"""labevents = pd.read_csv('LABEVENTS.csv.gz',compression='gzip',quotechar='"', error_bad_lines=False)
 labevents.info()
 labevents.head(20)
 labevents.FLAG.unique()
 a = sorted([str(i) for i in list(labevents.VALUE)])
-np.array(a)
+np.array(a) """
 
 
 #import ICUstays
@@ -126,7 +130,7 @@ hrt_adm_id = list(patients_readmitted_heart.HADM_ID.unique())
 
 
 #Merging the dataframe with admission to get the admission attributes
-patients_readmit_admattr = pd.merge(patients_readmitted_heart,admission[['HADM_ID','ADMISSION_TYPE', 'ADMISSION_LOCATION','DISCHARGE_LOCATION', 'INSURANCE', 'RELIGION','MARITAL_STATUS', 'ETHNICITY']] ,how = 'left' , on = ['HADM_ID'])
+patients_readmit_admattr = pd.merge(patients_readmitted_heart,admission[['HADM_ID','ADMISSION_TYPE','ADMITTIME', 'ADMISSION_LOCATION','DISCHARGE_LOCATION', 'INSURANCE', 'RELIGION','MARITAL_STATUS', 'ETHNICITY']] ,how = 'left' , on = ['HADM_ID'])
 patients_readmit_admattr.shape
 total_missing = patients_readmit_admattr.isnull().sum()
 patients_readmit_admattr.columns
@@ -210,6 +214,84 @@ final_dataset.columns
 final_dataset.info()
 total_missing = final_dataset.isnull().sum()
 total_missing[total_missing>0]
+
+# Impute Values for missing data
+final_dataset.loc[final_dataset.RELIGION.isnull(),['RELIGION']] = final_dataset.RELIGION.mode()[0]
+final_dataset.loc[final_dataset.MARITAL_STATUS.isnull(),['MARITAL_STATUS']] = final_dataset.MARITAL_STATUS.mode()[0]
+final_dataset.loc[final_dataset.LAST_CAREUNIT.isnull(),['LAST_CAREUNIT']] = final_dataset.LAST_CAREUNIT.mode()[0]
+final_dataset.loc[final_dataset.LOS.isnull(),['LOS']] = 0
+
+#EDA on Final Dataset
+final_dataset[final_dataset.DAYS_TO_READMISSION <= 60].shape
+final_dataset['READMISSION_60dAYS'] = final_dataset.DAYS_TO_READMISSION.apply(lambda x : 1 if x <= 60 else 0)
+final_dataset['READMISSION_30dAYS'] = final_dataset.DAYS_TO_READMISSION.apply(lambda x : 1 if x <= 30 else 0)
+
+#Splitting the data into Test & Train
+X = final_dataset.drop(['READMISSION_60dAYS', 'READMISSION_30dAYS' , 'DAYS_TO_READMISSION'],axis = 1)
+y = final_dataset['READMISSION_60dAYS']
+final_dataset.shape
+X.shape
+y.shape
+
+X_train1, X_test1, y_train, y_test = model_selection.train_test_split(X,y,test_size = 0.25 , stratify = y , random_state=2017)
+X_train1.shape
+y_train.shape
+X_test1.shape
+y_test.shape
+y_test[y_test == 0].count()
+
+
+##Data Preprocessing
+X_train1.rename(columns={'ADMITTIME':'CURR_ADMITTIME'}, inplace=True)
+X_train1.select_dtypes(include = ['object']).columns
+
+#Convert DOB to Datetime
+X_train1.DOB.head()
+X_train1['DOB'] = pd.to_datetime(X_train1['DOB'])
+X_train1['CURR_DISCHTIME'] = pd.to_datetime(X_train1['CURR_DISCHTIME'])
+X_train1['NXT_ADMITTIME'] = pd.to_datetime(X_train1['NXT_ADMITTIME'])
+X_train1['CURR_ADMITTIME'] = pd.to_datetime(X_train1['CURR_ADMITTIME'],format = "%Y/%m/%d")
+t = pd.Timestamp(X_train1[['CURR_ADMITTIME']])
+
+#Feature Engineering
+X_train1.CURR_ADMITTIME.dtypes
+
+#Making New feature Age
+X_train1.DOB.dtypes
+X_train1[['CURR_ADMITTIME','DOB']]
+X_train1['AGE'] = (((X_train1.CURR_ADMITTIME - X_train1.DOB)/ np.timedelta64(1, 'D')) / 365).round().astype('int64')
+X_train1[X_train1['AGE']<0][['AGE','CURR_ADMITTIME','DOB']]
+
+X_train1.loc[X_train1['AGE']<0,['AGE']] = - X_train1.loc[X_train1['AGE']<0,['AGE']]
+
+#Convert imestamp columns to Str
+X_train1.info()
+
+X_train1['CURR_DISCHTIME'] = X_train1['CURR_DISCHTIME'].apply(lambda x: dt.datetime.strftime(x, '%Y-%m-%d'))
+X_train1['NXT_ADMITTIME'] = X_train1['NXT_ADMITTIME'].apply(lambda x: dt.datetime.strftime(x, '%Y-%m-%d'))
+X_train1['CURR_ADMITTIME'] = X_train1['CURR_ADMITTIME'].apply(lambda x: dt.datetime.strftime(x, '%Y-%m-%d'))
+X_train1['DOB'] = X_train1['DOB'].apply(lambda x: dt.datetime.strftime(x, '%Y-%m-%d'))
+
+X_train2 = X_train1.drop(['CURR_DISCHTIME','NXT_ADMITTIME','CURR_ADMITTIME','DOB'],axis = 1)
+
+# One-Hot Encoding
+X_train = pd.get_dummies(X_train2, columns = ['ADMISSION_TYPE','ADMISSION_LOCATION','DISCHARGE_LOCATION','INSURANCE','RELIGION','MARITAL_STATUS','ETHNICITY','GENDER','LAST_CAREUNIT'])
+
+
+#Model Building
+rf_estimator = ensemble.RandomForestClassifier(random_state = 2017)
+param_grid = dict(n_estimators = range(50,750,50) , criterion = ['gini','entropy'] , max_features = [41,42,43,44,45])
+rf_grid_estimator = model_selection.GridSearchCV(rf_estimator, param_grid, cv =10 , verbose = 2)
+rf_grid_estimator.fit(X_train,y_train)
+print(rf_grid_estimator.best_estimator_)
+print(rf_grid_estimator.best_params_)
+print(rf_grid_estimator.best_score_)
+print(rf_grid_estimator.score(X_train, y_train))
+print(rf_grid_estimator.best_estimator_.feature_importances_)
+
+
+
+
 
 
 
